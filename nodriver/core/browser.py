@@ -137,6 +137,14 @@ class Browser:
         return list(tabs)
 
     @property
+    def iframes(self) -> List[tab.Tab]:
+        """returns the current targets which are of type "iframe"
+        :return:
+        """
+        iframes = filter(lambda item: item.type_ == "iframe", self.targets)
+        return list(iframes)
+
+    @property
     def cookies(self) -> CookieJar:
         if not self._cookies:
             self._cookies = CookieJar(self)

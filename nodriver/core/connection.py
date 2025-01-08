@@ -223,6 +223,13 @@ class Connection(metaclass=CantTouchThis):
             return True
         return self.websocket.closed
 
+    def set_handlers(
+        self,
+        event_handlers: Dict[type, List[Union[Callable, Awaitable]]]
+    ):
+        """sets the event handlers directly"""
+        self.handlers = event_handlers
+
     def add_handler(
         self,
         event_type_or_domain: Union[type, types.ModuleType],

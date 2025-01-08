@@ -14,6 +14,7 @@ from .. import cdp
 from . import element, util
 from .config import PathLike
 from .connection import Connection, ProtocolException
+from .util import filter_recurse
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ class Tab(Connection):
         self.browser = browser
         self._dom = None
         self._window_id = None
+        self._propagated_handlers: Dict[Union[type], Union[Callable, Awaitable]] = None
 
     @property
     def inspector_url(self):
@@ -141,6 +143,91 @@ class Tab(Connection):
         :rtype:
         """
         return f"http://{self.browser.config.host}:{self.browser.config.port}/devtools/inspector.html?ws={self.websocket_url[5:]}"
+
+    @property
+    def propagated_handlers(self):
+        """
+        gets a copy of the propagated event handlers
+        :return:
+        :rtype:
+        """
+        result = self._propagated_handlers
+        return result.copy() if result else None
+
+    async def iframes(self) -> List[Tab]:
+        """
+        get all iframe pages for this page
+        :return:
+        :rtype:
+        """
+        result = []
+        doc = await self.send(cdp.dom.get_document(-1, True))
+
+        for iframe in self.browser.iframes:
+            node = filter_recurse(doc, lambda node: node and node.frame_id and node.frame_id == iframe.target.target_id)
+            if node:
+                result.append(iframe)
+
+        return result
+
+    def _handle_target_update(
+        self,
+        event: Union[
+            cdp.target.TargetCreated,
+        ],
+    ):
+        if isinstance(event, cdp.target.TargetCreated):
+            search_id = event.target_info.target_id
+            targets = filter(lambda target: target.target.target_id == search_id, self.browser.targets)
+            target = next(targets)
+            asyncio.get_running_loop().create_task(
+                self._propagate_to_targets([target], event_handlers = self._propagated_handlers)
+            )
+
+    async def propagate_handlers(
+        self,
+        event_handlers: Dict[Union[type], Union[Callable, Awaitable]] = None
+    ):
+        """
+        sets up or modifies the event handlers that will be propagated to iframes
+        within the page
+
+        :param event_handlers: when None (default), it will apply all event handlers
+                               from this page to all iframes on the page.
+                               when an empty dictionary, it will remove all event handlers
+                               from the iframes.
+        :type event_handlers:
+
+        :return:
+        :rtype:
+        """
+        initialized  = self._propagated_handlers != None
+        initialize   = event_handlers != {} and not initialized
+        deinitialize = event_handlers == {} and initialized
+
+        if initialize:
+            logger.debug(
+                "adding browser target hooks and propagating events for parent target #%d",
+                self.browser.targets.index(self)
+            )
+            self.browser.connection.add_handler(cdp.target.TargetCreated, self._handle_target_update)
+
+        elif deinitialize:
+            logger.debug(
+                "removing all browser target hooks and propagated events for parent target #%d",
+                self.browser.targets.index(self)
+            )
+            self.browser.connection.handlers[cdp.target.TargetCreated].remove(self._handle_target_update)
+            self._propagated_handlers = None
+
+        if not deinitialize:
+            if event_handlers == None:
+                self._propagated_handlers = self.handlers.copy()
+            else:
+                self._propagated_handlers = event_handlers
+
+        await self
+        await self._propagate_to_targets(event_handlers = self._propagated_handlers)
 
     def inspector_open(self):
         import webbrowser
@@ -1394,6 +1481,34 @@ class Tab(Connection):
         s = f"<{type(self).__name__} [{self.target_id}] [{self.type_}] {extra}>"
         return s
 
+    def _propagate_to_target(
+        self,
+        target: Tab,
+        event_handlers: Dict[
+            Union[type, types.ModuleType], Union[Callable, Awaitable]
+        ]
+    ):
+        logger.debug(
+            "propagating event handlers from parent target #%d to child target #%d => %s",
+            self.browser.targets.index(self),
+            self.browser.targets.index(target),
+            event_handlers
+        )
+        target.set_handlers(event_handlers)
+
+    async def _propagate_to_targets(
+        self,
+        targets: List[Tab] = [],
+        event_handlers: Dict[Union[type, types.ModuleType], Union[Callable, Awaitable]] = None,
+    ):
+        if event_handlers == None:
+            event_handlers = {}
+        iframes = await self.iframes()
+        if len(targets) > 0:
+            iframes = list(filter(lambda target: target in iframes, targets))
+        for iframe in iframes:
+            self._propagate_to_target(iframe, event_handlers)
+            await iframe
 
 async def get_cf_label(tab: Tab):
     """
